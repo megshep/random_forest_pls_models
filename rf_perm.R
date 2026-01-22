@@ -1,31 +1,70 @@
-#RANDOM FOREST
+RANDOM FOREST
 
 # Install packages 
-# install.packages(c("randomForest", "ggplot2", "pdp"))
+# install.packages(c("randomForest", "ggplot2", "pdp", "oro.nifti"))
 
 # Load necessary libraries
 library(randomForest)
 library(ggplot2)
+library(oro.nifti)
 library(pdp)
 
-#this is done for reproducibility; therefore, the randomness is still random but fixed for anyone trying to rerun this analysis
-set.seed(123)
+setwd("/scratch/j90161ms")
 
-# Remove rows with missing data (complete cases only)
-exp_low_clean <- exp_low[complete.cases(exp_low), ]
+# Define patterns for the files that I want loaded in as input files
+patterns <- c("^HT.*\\.nii(\\.gz)?$",   # all HT*.nii or HT*.nii.gz
+              "^D.*\\.nii(\\.gz)?$",    # all D*.nii
+              "^CHRM.*\\.nii(\\.gz)?$", # all CHRM*.nii
+              "^CHRNA.*\\.nii(\\.gz)?$",# all CHRNA*.nii
+              "^ADR.*\\.nii(\\.gz)?$")  # all ADR*.nii
+
+# Get all files in scratch folder that match any of these patterns
+scratch_dir <- "/scratch/j90161ms/RandomForest/"
+nifti_files <- list.files(scratch_dir, full.names = TRUE)
+nifti_files <- nifti_files[grepl(paste(patterns, collapse="|"), basename(nifti_files))]
+
+# Check which files are included
+print(nifti_files)
+
+# 
+# Load NIfTI data and construct dataframe
+
+
+# Read all predictor NIfTI files and vectorise them
+predictor_data <- lapply(nifti_files, function(f) {
+  img <- readNIfTI(f, reorient = FALSE)
+  as.vector(img)
+})
+
+# Name predictors based on file names
+names(predictor_data) <- gsub("\\.nii(\\.gz)?$", "", basename(nifti_files))
+
+# Combine into a dataframe
+exp_low <- as.data.frame(predictor_data)
+
+# Load ELS map and vectorise
+els_img <- readNIfTI("/scratch/j90161ms/RandomForest/els_low.nii", reorient = FALSE)
+exp_low$els_low <- as.vector(els_img)
+
+# Replace NA values with 0 (the logic is that biologically an NA represents no gene expression)
+
+exp_low[is.na(exp_low)] <- 0
+
+#this is done for reproducibility; therefore, the randomness is still random but fixed for anyone trying to rerun >
+set.seed(123)
 
 # Fit random forest regression model
 rf_model <- randomForest(
   els_low ~ .,
-  data = exp_low_clean,
+  data = exp_low,
   importance = TRUE
 )
 
 # Predicts using the dataset.
-rf_predictions <- predict(rf_model, newdata = exp_low_clean)
+rf_predictions <- predict(rf_model, newdata = exp_low)
 
 # Calculate RMSE
-rf_rmse <- sqrt(mean((exp_low_clean$els_low - rf_predictions)^2))
+rf_rmse <- sqrt(mean((exp_low$els_low - rf_predictions)^2))
 print(rf_rmse)
 
 # Extract variable importance
@@ -36,8 +75,9 @@ print(importance_values)
 varImpPlot(rf_model)
 
 # Permutation-based feature-wise significance testing
+
 n_permutations <- 1000
-feature_names <- setdiff(colnames(exp_low_clean), "els_low")
+feature_names <- setdiff(colnames(exp_low), "els_low")
 obs_importance <- importance_values[, 1]
 
 #create a matrix to store the permuted importances
@@ -51,25 +91,28 @@ perm_importance <- matrix(
 #loop over features (predictors) and permutations, generates the 1000 null models for each predictor
 for (f in feature_names) {
   for (i in 1:n_permutations) {
-#shuffles the features
-    perm_data <- exp_low_clean
+
+    #shuffles the features
+    perm_data <- exp_low
     perm_data[[f]] <- sample(perm_data[[f]])
 
-
-#refits the random forest model on the permuted data
+    #refits the random forest model on the permuted data
     perm_model <- randomForest(
       els_low ~ .,
       data = perm_data,
       importance = TRUE
     )
+
     #records the permuted importance (the mean decrease in accuracy)
     perm_importance[i, f] <- importance(perm_model)[f, 1]
   }
 }
+
 #calculates p values
 p_values <- sapply(feature_names, function(f) {
   mean(perm_importance[, f] >= obs_importance[f])
 })
+
 #creates a dataframe that includes the name of the predictor, the observed importance and the p value 
 importance_results <- data.frame(
   Feature = feature_names,
@@ -91,27 +134,6 @@ ggplot(importance_results,
     y = "Mean Decrease in Accuracy"
   ) +
   theme_minimal()
-
-# Partial dependence plot for HT3A_map
-pdp_ht3a <- partial(
-  rf_model,
-  pred.var = "HT3A_map",
-  train = exp_low_clean
-)
-
-plot(pdp_ht3a, main = "Partial Dependence Plot: HT3A_map")
-
-# Partial dependence plot for multiple predictors
-pdp_multi <- partial(
-  rf_model,
-  pred.var = c("HT3A_map", "CHRNA5_map", "HT2B_map"),
-  train = exp_low_clean
-)
-
-plot(
-  pdp_multi,
-  main = "Partial Dependence Plot: HT3A_map, CHRNA5_map, HT2B_map"
-)
 
 # Model parameters
 rf_model$mtry
